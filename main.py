@@ -18,7 +18,6 @@ from matplotlib.dates import DateFormatter
 from matplotlib.ticker import AutoMinorLocator
 
 TOKEN = os.getenv("TOKEN")
-capitalPool = 50
 RED = 0x3498db
 PURPLE = 0x7289da
 BLUE = 0x3498db
@@ -30,12 +29,14 @@ description = '''Trade stock, lose money!'''
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="$",
-                   description=description,
-                   intents=intents)
+bot = commands.Bot(
+  command_prefix="$",
+  description=description,
+  intents=intents
+)
 
+# -- Daily update script --
 
-#-------
 class MyThread(Thread):
 
   def __init__(self, event):
@@ -45,27 +46,49 @@ class MyThread(Thread):
   def run(self):
     while not self.stopped.wait(3600):
       updateRecord()
+      
+
+def updateRecord():
+  time = datetime.now(pytz.timezone('Pacific/Auckland'))
+  date = f"{time.year}-{time.month}-{time.day}"
+
+  if len(liveData.dailyRecords):
+    priceSum = 0
+    for record in liveData.dailyRecords:
+      priceSum += record["Price"]
+    dailyPriceAvarage = round(priceSum / len(liveData.dailyRecords), 2)
+
+    liveData.records.append({
+      "Date": date,
+      "Price": dailyPriceAvarage if dailyPriceAvarage != 0 else liveData.records[-1]["Price"]
+    })
+    
+  liveData.dailyRecords = []
+  liveData.updateDatabase()
 
 
 my_event = Event()
 thread = MyThread(my_event)
 thread.start()
-# -------
+
+# -- End daily update script --
 
 
 class liveDatabase():
 
-  def __init__(self, listNames):
-    self.listNames = listNames
-    self.saleOffers, self.userAccounts, self.dailyRecords, self.records = self.loadDatabase(
-    )
-    self.saleOffers[0]["price"] = round(self.dailyRecords[-1]["Price"] * 1.05,
-                                        2)
+  def __init__(self):
+    #Order matters, do not change!
+    self.listNames = ["saleOffers", "userAccounts", "dailyRecords", "records"]
+    
+    self.loadDatabase()
+    self.lll = [
+      self.saleOffers, self.userAccounts, self.dailyRecords, self.records
+    ]
+
     self.updateDatabase()
     print("Live database initialised.")
 
-  def loadDatabase(self):
-    listOfDataLists = []
+  def loadDatabase(self):    
     for listName in self.listNames:
       with open(f'{listName}.csv', "r") as f:
         fileContent = list(csv.DictReader(f))
@@ -79,21 +102,20 @@ class liveDatabase():
       else:
         int_vals = []
 
+      #Convert int_vals to int data-type
       fileContent = [{
         key: (float(val) if key in int_vals else val)
         for key, val in record.items()
       } for record in fileContent]
-      print(f'{listName}: {fileContent}')
-      listOfDataLists.append(fileContent)
-    return listOfDataLists
+      
+      exec("self.{} = {}".format(listName, fileContent))
+      print(f'{listName}: {fileContent}\n')
 
   def updateDatabase(self):
-    self.lll = [
-      self.saleOffers, self.userAccounts, self.dailyRecords, self.records
-    ]
-    self.saleOffers[0]["price"] = round(self.dailyRecords[-1]["Price"] * 1.05,
-                                        2)
+    poolPrice = self.saleOffers[0]['price']
+    self.saleOffers[0]['price'] = round(poolPrice *1.05, 2) if poolPrice >0.6 else round(poolPrice * 1.5, 2)
     listIndex = -1
+    
     print("---Saving lists---")
     for list in self.lll:
       listIndex += 1
@@ -110,32 +132,7 @@ class liveDatabase():
         writer = csv.DictWriter(f, keys)
         writer.writeheader()
         writer.writerows(list)
-      print(".........")
-    print()
-    print()
-
-
-def updateRecord():
-  time = datetime.now(pytz.timezone('Pacific/Auckland'))
-  date = f"{time.year}-{time.month}-{time.day}"
-
-  if len(liveData.dailyRecords):
-    priceSum = 0
-    for record in liveData.dailyRecords:
-      priceSum += record["Price"]
-    dailyPriceAvarage = round(priceSum / len(liveData.dailyRecords), 2)
-
-    liveData.records.append({
-      "Date": date,
-      "Price": round(dailyPriceAvarage, 2)
-    })
-    liveData.dailyRecords = []
-  else:
-    liveData.records.append({
-      "Date": date,
-      "Price": liveData.records[-1]["Price"]
-    })
-  liveData.updateDatabase()
+      print(".........\n\n")
 
 
 def record(saleDict):
@@ -206,16 +203,17 @@ def getDict(dictList, key, value, type=101):
   raise KeyError(f'No dictionary in list with {key} of {value} found!')
 
 
-def proccessOffer(ctx, id, type, amount=1):
+def proccessOffer(ctx, id, type, amount=1, pool=False):
   saleOffer = getDict(liveData.saleOffers, "id", id, type)
   if canAfford(str(ctx.author), saleOffer, type, amount):
     if saleOffer["name"] == str(ctx.author):
       return "You can't purchase stock from yourself!"
     if chargeAccounts(ctx, saleOffer, amount):
-      record(saleOffer)
       if saleOffer["name"] != "pool":
         liveData.saleOffers.remove(saleOffer)
-      return f'{ctx.author} accepted {type.lower()} offer {saleOffer["id"]} from {saleOffer["name"]}.'
+        if pool:
+          return f'{ctx.author} bought coins from the pool at {saleOffer["price"]}/per coin.'
+        return f'{ctx.author} accepted {type.lower()} offer {saleOffer["id"]} from {saleOffer["name"]}.'
     return "Transaction failed for an unknow reason. Error report sent."
   return "You can not afford this offer!"
 
@@ -328,8 +326,7 @@ def plotDailyTrend():
   plt.savefig("dailyTrend.png")
 
 
-liveData = liveDatabase(
-  ["saleOffers", "userAccounts", "dailyRecords", "records"])
+liveData = liveDatabase()
 
 
 @bot.event
@@ -380,16 +377,6 @@ async def p(ctx, userName="noone"):
                       mention_author=False)
 
 
-@bot.command()
-async def cp(ctx):
-  pool = getDict(liveData.userAccounts, "Name", "pool")
-  poolInfo = discord.Embed(
-    title="Coin Pool",
-    description=
-    f"Available coins: {pool['STC']}\n Current price: ${round(liveData.dailyRecords[-1]['Price']*1.05, 2)}",
-    color=PURPLE)
-  await ctx.reply(embed=poolInfo, mention_author=False)
-
 
 @bot.command()
 async def dt(ctx):
@@ -434,10 +421,19 @@ async def bc(ctx, offerId=101):
   help=
   "Purchase STC from the pool. Coin price in the pool based on last sale price  +5%."
 )
-async def bpc(ctx, amount):
-  await ctx.reply(proccessOffer(ctx, choiceNumbers[0], "Sell", amount),
-                  mention_author=False)
-  liveData.updateDatabase()
+async def bpc(ctx, amount=None):
+  if amount:
+    await ctx.reply(proccessOffer(ctx, choiceNumbers[0], "Sell", amount, True), mention_author=False)
+    liveData.updateDatabase()
+  else:
+    pool = getDict(liveData.userAccounts, "Name", "pool")
+    poolInfo = discord.Embed(
+      title="Coin Pool",
+      description= f"Available coins: {pool['STC']}\n Current price: ${liveData.saleOffers[0]['price']}",
+      color=PURPLE
+    )
+    await ctx.reply(embed=poolInfo, mention_author=False)
+
 
 
 @bot.command(
@@ -512,7 +508,8 @@ gd = {
   "$t": "$t",
   "$mso": "$mso *quantity* *price*",
   "$mbo": "$mbo *quantity* *price*",
-  "$bc": "$bc [id]"
+  "$bc": "$bc [id]",
+  "$bpc": "$bpc [id]"
 }
 
 try:
