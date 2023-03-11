@@ -3,10 +3,10 @@ import os
 import discord
 from discord.ext import commands
 
-import traceback
-
 from datetime import datetime
 import pytz
+
+from passlib.hash import pbkdf2_sha256
 
 from threading import Thread, Event
 
@@ -24,10 +24,18 @@ from sqlalchemy.sql import text
 engine = create_engine(os.getenv("HOST"))
 db = scoped_session(sessionmaker(bind=engine))
 
-rs = db.execute(text('SELECT * FROM public.user'))
+def updateBotFileBalances():
+  rs = db.execute(text('SELECT * FROM public.user'))
+  for row in rs:
+    liveData.userAccounts = [{k:(float(row[3]) if (k == "STC" and userDict['freemartId'] == row[0]) else v) for (k,v)  in userDict.items() } for userDict in liveData.userAccounts]
 
-for row in rs:
-  print(row)
+
+def updateFreemartFileBalances():
+  for user in liveData.userAccounts:
+    if user["Name"] != "pool":
+      db.execute(text(f"UPDATE public.user SET balance = {user['STC']} WHERE id = {int(user['freemartId'])}"))
+      db.commit()
+
       
 TOKEN = os.getenv("TOKEN")
 RED = 0x3498db
@@ -36,8 +44,6 @@ BLUE = 0x3498db
 choiceNumbers = [
   "0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"
 ]
-
-
 
 
 description = '''Trade stock, lose money!'''
@@ -58,30 +64,37 @@ class MyThread(Thread):
     self.stopped = event
 
   def run(self):
-    while not self.stopped.wait(3600):
-      updateRecord()
+    
+    while True:
+      updated = False
+      now = datetime.now(pytz.timezone('Pacific/Auckland'))
+      while (now.hour == 0 and now.minute == 0 and now.second == 0):
+        now = datetime.now(pytz.timezone('Pacific/Auckland'))
+        if not updated:
+          updated = True
+          updateRecord()
+        else:
+          pass
 
 
 def updateRecord():
   time = datetime.now(pytz.timezone('Pacific/Auckland'))
   date = f"{time.year}-{time.month}-{time.day}"
 
-  if len(liveData.dailyRecords):
-    priceSum = 0
-    for record in liveData.dailyRecords:
-      priceSum += record["Price"]
-    dailyPriceAvarage = priceSum / len(liveData.dailyRecords), 2
+  priceSum = 0
+  for record in liveData.dailyRecords:
+    priceSum += record["Price"]
+  try:
+    dailyPriceAvarage = priceSum / len(liveData.dailyRecords)
+  except ZeroDivisionError:
+    dailyPriceAvarage = liveData.records[-1]["Price"]
 
-    liveData.records.append({
-      "Date":
-      date,
-      "Price":
-      dailyPriceAvarage
-      if dailyPriceAvarage != 0 else liveData.records[-1]["Price"]
+  liveData.records.append({
+    "Date": date,
+    "Price": dailyPriceAvarage
     })
-
-  liveData.dailyRecords = []
-  liveData.updateDatabase()
+  
+  liveData.updateDatabase(True)
 
 
 my_event = Event()
@@ -102,7 +115,7 @@ class liveDatabase():
       self.saleOffers, self.userAccounts, self.dailyRecords, self.records
     ]
 
-    self.updateDatabase()
+    self.updateDatabase(first=True)
     print("Live database initialised.")
 
   def loadDatabase(self):
@@ -111,7 +124,7 @@ class liveDatabase():
         fileContent = list(csv.DictReader(f))
 
       if listName == "userAccounts":
-        int_vals = ["$", "STC"]
+        int_vals = ["$", "STC", "freemartId"]
       elif listName == "saleOffers":
         int_vals = ["q", "price"]
       elif listName == "dailyRecords" or listName == "records":
@@ -128,33 +141,47 @@ class liveDatabase():
       exec("self.{} = {}".format(listName, fileContent))
       print(f'{listName}: {fileContent}\n')
 
-  def updateDatabase(self):
-    poolPrice = self.saleOffers[0]['price']
-    self.saleOffers[0]['price'] = poolPrice * 1.05 if poolPrice > 0.6 else poolPrice * 1.5
+  def updateDatabase(self, clearDaily=False, first=False):
+    try:
+      self.saleOffers[0]['price'] = self.dailyRecords[-1]['Price'] * 1.05
+    except IndexError:
+      pass
+
+    if not first:
+      updateFreemartFileBalances()
+      
+    
     listIndex = -1
 
     print("---Saving lists---")
+    self.lll = [
+      self.saleOffers, self.userAccounts, self.dailyRecords, self.records
+    ]
     for list in self.lll:
       listIndex += 1
-      print(list)
 
-      if list == []:
-        with open(f'{self.listNames[listIndex]}.csv', 'w') as f:
-          print(".........")
-          continue
+      if list == [] or (clearDaily and self.listNames[listIndex] == 'dailyRecords'):
+        with open(f'{self.listNames[listIndex]}.csv', 'r+') as f:
+            f.readline()
+            f.truncate(f.tell())
+        print(".........\n")
+        continue
+      
 
       keys = list[0].keys()
-
+      print(keys)
+      print(list)
       with open(f'{self.listNames[listIndex]}.csv', 'w', newline='') as f:
         writer = csv.DictWriter(f, keys)
         writer.writeheader()
         writer.writerows(list)
-      print(".........\n\n")
+      print(".........\n")
+      
 
 
-def record(saleDict):
+def record(saleDict, amount):
   time = datetime.now(pytz.timezone('Pacific/Auckland'))
-  pricePerCoin = saleDict["price"] / saleDict["q"]
+  pricePerCoin = saleDict["price"] / saleDict['q']
   saleRecord = {
     "Time": f'{time.hour}:{time.minute}',
     "Price": pricePerCoin
@@ -166,9 +193,12 @@ def generateProfileEmbed(userName):
   userDict = getDict(liveData.userAccounts, "Name", userName)
   profileEmbed = discord.Embed(
     title=f"{userName}'s Profile!",
-    description=
-    f"Name: {userName}\n$: **{userDict['$']}**\nSTC: **{userDict['STC']}**",
-    color=BLUE)
+    description=f'''
+      Name: {userName}\n
+      $: **{userDict['$']}**\n
+      STC: **{userDict['STC']}**''',
+    color=BLUE
+  )
   return profileEmbed
 
 
@@ -192,7 +222,7 @@ def generateEmbed(bOs):
   return saleEmbed
 
 
-def registerUser(ctx, currentSTCPrice):
+def registerUser(ctx, currentSTCPrice, id):
   welcomeEmbed = discord.Embed(
     title=f'Welocme to STC, {ctx.author}!',
     description='Buy, sell and exchange coins. Turn a profit if you can...',
@@ -201,18 +231,21 @@ def registerUser(ctx, currentSTCPrice):
     text=
     f'Your balance has been topped with an initial ${currentSTCPrice*5.0}, enough for 5 coins rn. Yapi!'
   )
+  
   liveData.userAccounts.append({
     "Name": str(ctx.author),
+    "freemartId": float(id),
     "$": currentSTCPrice * 5.0,
     "STC": 0
   })
+  updateBotFileBalances()
   return welcomeEmbed
 
 
-def getDict(dictList, key, value, type=101):
+def getDict(dictList, key, value, type=None):
   for dict in dictList:
     if dict[key] == value:
-      if type != 101:
+      if type:
         if dict["type"] == type:
           return dict
       else:
@@ -222,43 +255,39 @@ def getDict(dictList, key, value, type=101):
 
 def proccessOffer(ctx, id, type, amount=1, pool=False):
   saleOffer = getDict(liveData.saleOffers, "id", id, type)
-  if canAfford(str(ctx.author), saleOffer, type, amount):
-    if saleOffer["name"] == str(ctx.author):
+  if canAfford(str(ctx.author), saleOffer, amount):
+    if saleOffer['name'] == str(ctx.author):
       return "You can't purchase stock from yourself!"
-    if chargeAccounts(ctx, saleOffer, amount):
-      if saleOffer["name"] != "pool":
-        liveData.saleOffers.remove(saleOffer)
-        if pool:
-          return f'{ctx.author} bought coins from the pool at {saleOffer["price"]}/per coin.'
-        return f'{ctx.author} accepted {type.lower()} offer {saleOffer["id"]} from {saleOffer["name"]}.'
-    return "Transaction failed for an unknow reason. Error report sent."
-  return "You can not afford this offer!"
+    chargeAccounts(str(ctx.author), saleOffer, amount)
+    record(saleOffer, amount)
+    if saleOffer['name'] != 'pool':
+      liveData.saleOffers.remove(saleOffer)
+      return f'{ctx.author} accepted {type.lower()} offer {saleOffer["id"]} from {saleOffer["name"]}'  
+    if pool:
+      return f'{ctx.author} bought coins from the pool at {saleOffer["price"]}/per coin'     
+  return 'You cannot afford this offer!'
 
 
-def canAfford(userName, saleOffer, type, amount):
-  key = "$" if type == "Sell" else "STC"
-  if getDict(liveData.userAccounts, "Name", userName)[key] >= saleOffer["price"] * float(amount):
+def canAfford(userName, saleOffer, amount):
+  key = "$" if saleOffer['type'] == 'Sell' else 'STC'
+  if getDict(liveData.userAccounts, "Name", userName)[key] >= saleOffer['price'] * amount:
     return True
   return False
 
 
-def chargeAccounts(ctx, saleDict, amount):
-  quant = (saleDict['q'] * float(amount))
-  price = (saleDict['price'] * float(amount))
-  productKey = "STC" if saleDict["type"] == "Sell" else "$"
-  priceKey = "$" if saleDict["type"] == "Sell" else "STC"
-  accepterIndex = liveData.userAccounts.index(
-    getDict(liveData.userAccounts, "Name", str(ctx.author)))
-  sellerIndex = liveData.userAccounts.index(
-    getDict(liveData.userAccounts, "Name", saleDict['name']))
-  try:
-    liveData.userAccounts[sellerIndex][priceKey] += price
-    liveData.userAccounts[sellerIndex][productKey] -= quant
-    liveData.userAccounts[accepterIndex][priceKey] -= price
-    liveData.userAccounts[accepterIndex][productKey] += quant
-  except Exception as e:
-    print(traceback.format_exc())
-    return False
+def chargeAccounts(userName, saleDict, amount):
+  q = (saleDict['q'] * amount)
+  price = (saleDict['price'] * amount)
+  productKey = "STC" if saleDict['type'] == "Sell" else "$"
+  priceKey = "$" if saleDict['type'] == "Sell" else "STC"
+  accepterIndex = liveData.userAccounts.index(getDict(liveData.userAccounts, "Name", userName))
+  sellerIndex = liveData.userAccounts.index(getDict(liveData.userAccounts, "Name", saleDict['name']))
+  liveData.userAccounts[sellerIndex][priceKey] += price
+  liveData.userAccounts[sellerIndex][productKey] -= q
+  liveData.userAccounts[accepterIndex][priceKey] -= price
+  liveData.userAccounts[accepterIndex][productKey] += q
+  
+  
   return True
 
 
@@ -274,16 +303,17 @@ def publishSaleOffer(ctx, q, price, type):
   newSaleOffer = {
     "id": choiceNumbers[i + 1],
     "name": str(ctx.author),
-    "q": int(q),
-    "price": int(price),
+    "q": float(q),
+    "price": float(price),
     "type": type
   }
+  
   try:
     existingOffer = getDict(liveData.saleOffers, "name", str(ctx.author), type)
   except KeyError:
     liveData.saleOffers.append(newSaleOffer)
     return newSaleOffer
-  return existingOffer["id"]
+  return existingOffer['id']
 
 
 def saleTypeList(type):
@@ -298,8 +328,8 @@ def saleTypeList(type):
 
 def plotTrend():
   df = pandas.read_csv("records.csv")
-
   df["Date"] = pandas.to_datetime(df["Date"], format='%Y-%m-%d')
+  
   fig, ax = plt.subplots()
   ax.plot(df["Date"], df["Price"], "r.-")
   plt.title("Trend")
@@ -307,22 +337,24 @@ def plotTrend():
   plt.xlabel("Date")
   date_form = DateFormatter('%Y-%m-%d')
   ax.xaxis.set_major_formatter(date_form)
-
   ax.yaxis.set_minor_locator(AutoMinorLocator(5))
   ax.xaxis.set_minor_locator(AutoMinorLocator(5))
-
   ax.grid(which='major', color='#393E46', linestyle='-')
   ax.grid(which='minor', color='#6D9886', linestyle='--')
   plt.style.use("fivethirtyeight")
   plt.subplots_adjust(bottom=0.18)
   plt.ylim(ymin=0.0)
   fig.autofmt_xdate()
+  
   plt.savefig("trend.png")
+  
   plt.style.use('default')
+
 
 def plotDailyTrend():
   df = pandas.read_csv("dailyRecords.csv")
   df["Time"] = pandas.to_datetime(df["Time"], format='%H:%M')
+  
   fig, ax = plt.subplots()
   ax.plot(df["Time"], df["Price"], "r.-")
   plt.title("Daily Trend")
@@ -330,20 +362,21 @@ def plotDailyTrend():
   plt.xlabel("Time")
   date_form = DateFormatter('%H:%M')
   ax.xaxis.set_major_formatter(date_form)
-  #ax.yaxis.set_major_locator(MultipleLocator(20))
   ax.yaxis.set_minor_locator(AutoMinorLocator(5))
   ax.xaxis.set_minor_locator(AutoMinorLocator(5))
-
   ax.grid(which='major', color='#393E46', linestyle='-')
   ax.grid(which='minor', color='#6D9886', linestyle='--')
   plt.style.use('fivethirtyeight')
   plt.subplots_adjust(bottom=0.18)
   plt.ylim(ymin=0.0)
+  
   plt.savefig("dailyTrend.png")
+  
   plt.style.use('default')
 
-liveData = liveDatabase()
 
+liveData = liveDatabase()
+updateBotFileBalances()
 
 @bot.event
 async def on_ready():
@@ -354,175 +387,270 @@ async def on_ready():
   print("------" * 2)
 
 
+
+
 @bot.event
-async def on_command(ctx):
-  if str(ctx.author) in [user['Name'] for user in liveData.userAccounts]:
-    pass
-  else:
-    await ctx.reply(embed=registerUser(ctx,
-                                       liveData.dailyRecords[-1]["Price"]),
-                    mention_author=False)
-    liveData.updateDatabase()
-    await ctx.message.delete()
+async def on_message(ctx):
+    if not ctx.guild and ctx.author != bot.user:
+        rs = db.execute(text('SELECT * FROM public.user'))
+        for row in rs:
+          if row[0] == ctx.content.split(' ')[0]:
+            if pbkdf2_sha256.verify(ctx.content.split(' ')[1], row[2]):
+              print("FreemArt LOGIN")
+              try:
+                await ctx.reply(embed=registerUser(
+        ctx,liveData.dailyRecords[-1]["Price"], ctx.content.split(' ')[0]), mention_author=False)
+              except IndexError:
+                await ctx.reply(embed=registerUser(
+        ctx,liveData.records[-1]["Price"], ctx.content.split(' ')[0]), mention_author=False)
+        liveData.updateDatabase()
+    else:
+      if ctx.author != bot.user:
+        if str(ctx.author) in [user['Name'] for user in liveData.userAccounts]:
+          await bot.process_commands(ctx)
+        else:
+          await ctx.reply('Check DMs to login to your FreeMart account', mention_author=True)
+          discordUserName = await bot.fetch_user(ctx.author.id)
+          await discordUserName.send("Please enter your FreeMart username *space* password, so:")
+          await discordUserName.send("username password")
 
 
 @bot.event
 async def on_command_error(ctx, error):
+  developer = await bot.fetch_user("909359661533233202")
   if isinstance(error, commands.CommandNotFound):
-    await ctx.reply("That's not a real command!", mention_author=False)
+    await ctx.reply(
+      "That's not a real command!", 
+      mention_author=True
+    )
+    
   elif isinstance(error, commands.MissingRequiredArgument):
     await ctx.reply(
       "You missed one or more required arguments for this command:",
-      mention_author=False)
+      mention_author=False
+    )
     await ctx.send(gd[ctx.message.content.split(" ")[0]])
   else:
+    await developer.send(error)
     raise error
 
 
-@bot.command(aliases=["p"])
-async def profile(ctx, userName="noone"):
-  if userName == "noone":
-    await ctx.reply(embed=generateProfileEmbed(str(ctx.author)),
-                    mention_author=False)
+# --- BOT COMMANDS ---
+
+
+@bot.command(aliases=['p'], help="Show your profile, or another user's profile with $profile [userName]")
+async def profile(ctx, userName=None):
+  if not userName:
+    await ctx.reply(
+      embed=generateProfileEmbed(str(ctx.author)), 
+      mention_author=False
+    )
+    
   else:
-    if any(d["Name"] == userName for d in liveData.userAccounts):
-      await ctx.reply(embed=generateProfileEmbed(userName),
-                      mention_author=False)
+    if any(user['Name'] == userName for user in liveData.userAccounts):
+      await ctx.reply(
+        embed=generateProfileEmbed(userName),
+        mention_author=False
+      )
+      
     else:
-      await ctx.reply(f"No user with name {userName} exists.",
-                      mention_author=False)
+      await ctx.reply(
+        f'No user with name {userName} exists.',
+        mention_author=False
+      )
 
 
-@bot.command()
-async def dt(ctx):
+@bot.command(aliases=['dt'], help="Show daily stock price trend on a graph")
+async def dailyTrend(ctx):
   plotDailyTrend()
-  await ctx.reply(file=discord.File('dailyTrend.png'), mention_author=False)
-  os.remove("dailyTrend.png")
+  await ctx.reply(
+    file=discord.File('dailyTrend.png'), 
+    mention_author=False
+  )
 
 
-@bot.command()
-async def t(ctx):
+@bot.command(aliases=['t'], help="Show all-time stock price trend on a graph")
+async def trend(ctx):
   plotTrend()
-  await ctx.reply(file=discord.File('trend.png'), mention_author=False)
-  os.remove("trend.png")
+  await ctx.reply(
+    file=discord.File('trend.png'), 
+    mention_author=False
+  )
 
 
-@bot.command(help='View and choose from available sell offers, to get STC.')
-async def bc(ctx, offerId=101):
-  if offerId != 101:
-    if any(d["id"] == choiceNumbers[offerId] for d in liveData.saleOffers):
-      await ctx.reply(proccessOffer(ctx, str(choiceNumbers[offerId]), "Sell"),
-                      mention_author=False)
+@bot.command(aliases=['bc'], help='View and choose from available STC sell offers')
+async def buycoin(ctx, offerId=None):
+  if offerId:
+    if any(saleOffer['id'] == choiceNumbers[offerId] if saleOffer['type'] == "Sell" else False for saleOffer in liveData.saleOffers):
+      await ctx.reply(
+        proccessOffer(ctx, choiceNumbers[offerId], 'Sell'),
+        mention_author=False
+      )
+      
     else:
-      await ctx.reply("Sell offer does not exist, or is no longer available.",
-                      mention_author=False)
+      await ctx.reply(
+        'Sell offer does not exist, or is no longer available',
+        mention_author=False
+      )
+      
   else:
-    message = await ctx.reply(embed=generateEmbed("Sell"),
-                              mention_author=False)
-    for saleOffer in saleTypeList("Sell"):
-      if saleOffer["name"] != "pool":
-        await message.add_reaction(saleOffer["id"])
+    sellOffersOptionsMessage = await ctx.reply(
+      embed=generateEmbed('Sell'),
+      mention_author=False
+    )
+    for saleOffer in saleTypeList('Sell'):
+      if saleOffer['name'] != 'pool':
+        await sellOffersOptionsMessage.add_reaction(saleOffer["id"])
 
     def check(reaction, user):
-      return user == ctx.message.author and reaction.message == message
+      #message.
+      return user == ctx.author and reaction.message == sellOffersOptionsMessage
 
-    reaction = await bot.wait_for("reaction_add", check=check, timeout=30)
-    await ctx.reply(proccessOffer(ctx, str(reaction[0]), "Sell"),
-                    mention_author=False)
+    reaction = await bot.wait_for('reaction_add', check=check, timeout=30)
+    await ctx.reply(
+      proccessOffer(ctx, str(reaction[0]), 'Sell'),
+      mention_author=False
+    )
+    
   liveData.updateDatabase()
 
 
-@bot.command(help="Purchase STC from the pool. Coin price in the pool based on last sale price  +5%.", aliases=["bpc"])
+@bot.command(aliases=['bpc'], help='View STC pool or purchase from pool with $bpc [amount]. Coin price in the pool based on last sale price +5%')
 async def buypoolcoin(ctx, amount=None):
   pool = getDict(liveData.userAccounts, "Name", "pool")
   if amount:
+    amount = float(amount)
     if pool['STC'] >= amount:
-      await ctx.reply(proccessOffer(ctx, choiceNumbers[0], "Sell", amount, True), mention_author=False)
+      await ctx.reply(
+        proccessOffer(ctx, choiceNumbers[0], "Sell", amount, True),
+        mention_author=False
+      )
       liveData.updateDatabase()
+      
     else: 
-      await ctx.reply("The pool does not have enough STC available")
+      await ctx.reply('The pool does not have enough STC available')
+      
   else:
     poolInfo = discord.Embed(
-      title="Coin Pool",
-      description=
-      f"Available coins: {pool['STC']}\n Current price: ${liveData.saleOffers[0]['price']}",
-      color=PURPLE)
-    await ctx.reply(embed=poolInfo, mention_author=False)
+      title='Coin Pool',
+      description=f'''
+      Available coins: {pool['STC']}\n 
+      Current price: ${liveData.saleOffers[0]['price']}/per coin''',
+      color=PURPLE
+    )
+    await ctx.reply(
+      embed=poolInfo, 
+      mention_author=False
+    )
 
 
-@bot.command(
-  help='View and choose from available sell offers. To echange for $.')
-async def sc(ctx, offerId=101):
-  if offerId != 101:
-    if any(d["id"] == choiceNumbers[offerId]
-           for d in liveData.saleOffers) and offerId != 0:
-      await ctx.reply(proccessOffer(ctx, str(choiceNumbers[offerId]), "Buy"),
-                      mention_author=False)
+@bot.command(aliases=['sc'],
+  help='View and choose from available buy offers offers')
+async def sellCoin(ctx, offerId=None):
+  if offerId:
+    if any(saleOffer["id"] == choiceNumbers[offerId] if saleOffer['type'] == 'Sell' else False for saleOffer in liveData.saleOffers):
+      await ctx.reply(
+        proccessOffer(ctx, str(choiceNumbers[offerId]), 'Buy'),
+        mention_author=False
+      )
+      
     else:
-      await ctx.reply("Buy offer does not exist, or is no longer available.",
-                      mention_author=False)
+      await ctx.reply(
+        'Buy offer does not exist, or is no longer available',
+        mention_author=False
+      )
+      
   else:
-    message = await ctx.reply(embed=generateEmbed("Buy"), mention_author=False)
+    buyOffersOptionsMessage = await ctx.reply(
+      embed=generateEmbed("Buy"), 
+      mention_author=False
+    )
     for saleOffer in saleTypeList("Buy"):
       if saleOffer["name"] != "pool":
-        await message.add_reaction(saleOffer["id"])
+        await buyOffersOptionsMessage.add_reaction(saleOffer["id"])
 
     def check(reaction, user):
-      return user == ctx.message.author
+      return user == ctx.author and reaction.message == buyOffersOptionsMessage
 
-    reaction = await bot.wait_for("reaction_add", check=check, timeout=60)
-    await ctx.reply(proccessOffer(ctx, str(reaction[0]), "Buy"),
-                    mention_author=False)
+    reaction = await bot.wait_for("reaction_add", check=check, timeout=30)
+    await ctx.reply(
+      proccessOffer(ctx, str(reaction[0]), "Buy"),
+      mention_author=False
+    )
+    
   liveData.updateDatabase()
 
 
-@bot.command()
-async def mso(ctx, quantity, price, *extra):
-  if len(liveData.saleOffers) > 9:
+@bot.command(aliases=['mso'],
+  help='Make a sell offer')
+async def makeselloffer(ctx, quantity, price, *extra):
+  if len([saleOffer for saleOffer in liveData.saleOffers if saleOffer['type'] == 'Sell']) > 10:
     await ctx.reply(
-      "Maximum number of sell offers reached. Please wait for a space.",
-      mention_author=False)
+      "Maximum number of sell offers (10) reached. Please wait for a space",
+      mention_author=False
+    )
     return
+    
   offer = publishSaleOffer(ctx, quantity, price, "Sell")
   if offer in choiceNumbers:
-    await ctx.reply(f"You already have a sell offer up (id:{offer})",
-                    mention_author=False)
-  else:
-    confirmationEmbed = discord.Embed(title="Sell Offer Publiched")
-    confirmationEmbed.add_field(name="Hi", value=offer)
-    await ctx.reply(embed=confirmationEmbed, mention_author=False)
-    for ex in extra:
-      await ctx.send(f"Ingored unnecessary argument: {ex}")
+    await ctx.reply(
+      f'You already have a sell offer up (id:{offer})',
+      mention_author=False
+    )
+    return
+    
+  confirmationEmbed = discord.Embed(title='Sell Offer Published')
+  confirmationEmbed.add_field(name='', value=offer)
+  await ctx.reply(
+    embed=confirmationEmbed, 
+    mention_author=False
+  )
+  for ex in extra:
+    await ctx.send(f'Ingored unnecessary argument: {ex}')
+      
   liveData.updateDatabase()
 
 
-@bot.command()
-async def mbo(ctx, quantity, price, *extra):
-  if len(liveData.saleOffers) > 9:
+@bot.command(aliases=['mbo'],
+  help='Make a buy offer')
+async def makebuyoffer(ctx, quantity, price, *extra):
+  if len([saleOffer for saleOffer in liveData.saleOffers if saleOffer['type'] == 'Buy']) > 9:
     await ctx.reply(
-      "Maximum number of buy offers reached. Please wait for a space.",
-      mention_author=False)
+      'Maximum number of buy offers (9) reached. Please wait for a space',
+      mention_author=False
+    )
     return
+    
   offer = publishSaleOffer(ctx, quantity, price, "Buy")
   if offer in choiceNumbers:
-    await ctx.reply(f"You already have a buy offer up (id:{offer})",
-                    mention_author=False)
-  else:
-    confirmationEmbed = discord.Embed(title="Buy Offer Published")
-    confirmationEmbed.add_field(name="Behold", value=offer)
-    await ctx.reply(embed=confirmationEmbed, mention_author=False)
-    for ex in extra:
-      await ctx.send(f"Ingored unnecessary argument: {ex}")
+    await ctx.reply(
+      f'You already have a buy offer up (id:{offer})',
+      mention_author=False
+    )
+    return
+
+  confirmationEmbed = discord.Embed(title='Buy Offer Published')
+  confirmationEmbed.add_field(name='', value=offer)
+  await ctx.reply(
+    embed=confirmationEmbed, 
+    mention_author=False
+  )
+  for ex in extra:
+    await ctx.send(f'Ingored unnecessary argument: {ex}')
+    
   liveData.updateDatabase()
 
 
 gd = {
   "$dt": "$dt",
   "$help": "$help [command name]",
+  "$p": "$p [userName]",
   "$t": "$t",
-  "$mso": "$mso *quantity* *price*",
-  "$mbo": "$mbo *quantity* *price*",
+  "$dt": "$dt",
+  "$mso": "$mso [*quantity*] [*price*]",
+  "$mbo": "$mbo [*quantity*] [*price*]",
   "$bc": "$bc [id]",
+  "$sc": "$sc [id]",
   "$bpc": "$bpc [id]"
 }
 
