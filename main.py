@@ -139,8 +139,9 @@ class liveDatabase():
     self.lll = [
       self.saleOffers, self.userAccounts, self.dailyRecords, self.records
     ]
-    listIndex = 0
+    listIndex = -1
     for list in self.lll:
+      listIndex += 1
       print(self.listNames[listIndex])
       if list == [] or (clearDaily and self.listNames[listIndex] == 'dailyRecords'):
         with open(f'{self.listNames[listIndex]}.csv', 'r+') as f:
@@ -156,7 +157,6 @@ class liveDatabase():
         writer = csv.DictWriter(f, keys)
         writer.writeheader()
         writer.writerows(list)
-      listIndex += 1
       print(".........\n")
       
 
@@ -217,7 +217,7 @@ def generateSaleEmbed(bOs):
     value=f'{bOs}er       Quantity       Price'
   )
   saleEmbed.set_footer(
-    text="P.S. you can use $sc _idNumber_ to accept a buy offer straight away."
+    text="P.S. you can use $sc [IDNumber] to accept a buy offer straight away."
   )
   for saleOffer in liveData.saleOffers:
     if saleOffer["type"] == bOs and saleOffer["name"] != "pool":
@@ -242,7 +242,7 @@ def registerUser(ctx):
   )
   welcomeEmbed.set_footer(
     text=f'''
-    Your balance has been topped with an initial ${currentFMCPrice*5.0}, enough for 5 coins rn. Yapi!'''
+    Your balance has been topped with an initial ${currentFMCPrice*50.0}, enough for 50 coins rn. Yapi!'''
   )
   
   rows = db.execute(text('SELECT * FROM public.user'))
@@ -254,7 +254,7 @@ def registerUser(ctx):
           'Name': str(ctx.author),
           'freemartId': float(row[0]),
           'freemartName': str(row[1]),
-          '$': currentFMCPrice * 5.0,
+          '$': currentFMCPrice * 50.0,
           'FMC': 0.0
         })
         syncToFreeMart()
@@ -319,9 +319,15 @@ def publishSaleOffer(ctx, q, price, type):
   i = 0
   for offer in liveData.saleOffers:
     if offer["type"] == type:
+      print(CHOICE_NUMBERS[i])
+      print(offer['id'])
+      if CHOICE_NUMBERS[i] == offer['id']:
+        pass
+      else:
+        break
       i += 1
   newSaleOffer = {
-    "id": CHOICE_NUMBERS[i + 1],
+    "id": CHOICE_NUMBERS[i],
     "name": str(ctx.author),
     "q": q,
     "price": price,
@@ -342,9 +348,8 @@ def saleTypeList(type):
   for dict in liveData.saleOffers:
     if dict["type"] == type and dict['name'] != 'pool':
       saleListOfType.append(dict)
-  if len(saleListOfType): 
-    return saleListOfType
-  raise KeyError("No sale offers of specified type")
+  return saleListOfType
+  
 
 
 def plotTrend():
@@ -400,6 +405,7 @@ def plotDailyTrend():
 
 liveData = liveDatabase()
 syncToFreeMart()
+liveData.updateDatabase()
 
 # ----- Bot events -----
 
@@ -440,22 +446,24 @@ async def on_command_error(ctx, error):
       "That's not a real command!", 
       mention_author=True
     )
-    
-  elif isinstance(error, commands.MissingRequiredArgument):
+    return
+  await ctx.send('There was an issue executing your command', mention_author=False)  
+  if isinstance(error, commands.MissingRequiredArgument):
     await ctx.reply(
-      'You missed one or more required arguments for this command:',
+      'You missed one or more required arguments for this command',
       mention_author=False
     )
-    await ctx.send(f'Use $help{ctx.invoked_with} to learn more')
-  else:
-    developer = await bot.fetch_user('909359661533233202')
-    await developer.send(error)
-    raise error
+  return
+  
+  await ctx.send(f'Use **$help {ctx.invoked_with}** to learn more')
+  developer = await bot.fetch_user('909359661533233202')
+  await developer.send(error)
+  raise error
 
 
 # ----- BOT COMMANDS -----
 
-@bot.command(aliases=['p'], brief="Display profile", description="Show your profile, or another user's profile with $profile [userName]")
+@bot.command(aliases=['p'], brief="Display profile", description="Show your profile, or another user's profile with $profile @userName")
 async def profile(ctx, userName: discord.User = commands.parameter(default=None, description="- Mention desired user, or leave blank for self.")):
   if not userName:
     await ctx.reply(
@@ -464,7 +472,7 @@ async def profile(ctx, userName: discord.User = commands.parameter(default=None,
     )
     
   else:
-    userName = userName.name + userName.discriminator
+    userName = f'{userName.name}#{userName.discriminator}'
     if any(user['Name'] == userName for user in liveData.userAccounts):
       await ctx.reply(
         embed=generateProfileEmbed(userName),
@@ -487,7 +495,7 @@ async def explain(ctx):
 
 
 @bot.command(aliases=['dt'], brief="Plot daily graph", description="Show daily stock price trend on a graph")
-async def dailyTrend(ctx):
+async def dailytrend(ctx):
   plotDailyTrend()
   await ctx.reply(
     file=discord.File('dailyTrend.png'), 
@@ -504,9 +512,15 @@ async def trend(ctx):
   )
 
 
-@bot.command(aliases=['bc'], brief="Trade for FMS", description='View and choose from available FMC sell offers, or buy FMC directly with $bc [offerID]')
+@bot.command(aliases=['bc'], brief="Trade for FMC", description='View and choose from available FMC sell offers, or buy FMC directly with $bc [offerID]')
 async def buycoin(ctx, offerId: int = commands.parameter(default=None, description="- ID of offer you want to accept.")):
-  if offerId:
+  if offerId == 0:
+    await ctx.reply(
+      'Please use **$bpc** to buy coins from the pool',
+      mention_author=False
+      )
+    return
+  elif offerId:
     if any(saleOffer['id'] == CHOICE_NUMBERS[offerId] if saleOffer['type'] == "Sell" else False for saleOffer in liveData.saleOffers):
       await ctx.reply(
         proccessOffer(ctx, CHOICE_NUMBERS[offerId], 'Sell'),
@@ -574,7 +588,7 @@ async def buypoolcoin(ctx, amount: float = commands.parameter(default=None, desc
 
 @bot.command(aliases=['sc'], brief="Trade for $", description='View and choose from available FMC buy offers, or sell FMC directly with $sc [offerID]')
 async def sellcoin(ctx, offerId: int = commands.parameter(default=None, description="- ID of offer you want to accept.")):
-  if offerId:
+  if offerId or offerId == 0:
     if any(saleOffer["id"] == CHOICE_NUMBERS[offerId] if saleOffer['type'] == 'Buy' else False for saleOffer in liveData.saleOffers):
       await ctx.reply(
         proccessOffer(ctx, str(CHOICE_NUMBERS[offerId]), 'Buy'),
@@ -620,6 +634,13 @@ async def makeselloffer(ctx, quantity: float = commands.parameter(description="-
       mention_author=False
     )
     return
+
+  if quantity > getDict(liveData.userAccounts, "Name", str(ctx.author))['FMC']:
+    await ctx.reply(
+      'You cannot sell more FMC than you own, Jeremy.',
+      mention_author=False
+    )
+    return
     
   if len([saleOffer for saleOffer in liveData.saleOffers if saleOffer['type'] == 'Sell']) > 10:
     await ctx.reply(
@@ -660,6 +681,14 @@ async def makebuyoffer(ctx, quantity: float = commands.parameter(description="- 
       mention_author=False
     )
     return
+
+  if price > getDict(liveData.userAccounts, "Name", str(ctx.author))['$']:
+    await ctx.reply(
+      'You cannot buy more FMC than you can afford, JT.',
+      mention_author=False
+    )
+    return
+
     
   if len([saleOffer for saleOffer in liveData.saleOffers if saleOffer['type'] == 'Buy']) > 11:
     await ctx.reply(
@@ -691,22 +720,38 @@ async def makebuyoffer(ctx, quantity: float = commands.parameter(description="- 
   liveData.updateDatabase()
 
 
-@bot.command(aliases=['ro'], help="Remove one your offers")
-async def removeoffer(ctx, type: str = commands.parameter(description="- Type of your offer Buy/Sell?"), id: int = commands.parameter(description="- ID of your offer to remove.")):
-  offerToRemove = getDict(liveData.saleOffers, "id", CHOICE_NUMBERS[id], type.capitalize())
+@bot.command(aliases=['ro'], help="Remove one of your offers")
+async def removeoffer(ctx, type: str = commands.parameter(description="- Type of your offer: Buy/Sell?"), id: int = commands.parameter(description="- ID of your offer to remove.")):
+  if not type.capitalize() in ["Buy", "Sell"]:
+    await ctx.reply(
+      f'{type} is not a valid offer type. Either Buy or Sell',
+      mention_author=False
+    )
+    return
+    
+  try:
+    offerToRemove = getDict(liveData.saleOffers, "id", CHOICE_NUMBERS[id], type.capitalize())
+  except KeyError:
+    await ctx.reply(
+      f'No {type.capitalize()} offer with id of {id} found',
+      mention_author=False
+    )
+    return
+    
   if offerToRemove['name'] != str(ctx.author):
     await ctx.reply(
     f"Nice try, but you can't remove someone else's offer. It belongs to {offerToRemove['name']}", 
     mention_author=False
     )
-  else:
-    liveData.saleOffers = list(filter(lambda offer: offer['id'] != id and offer['type'] != type.capitalize(), liveData.saleOffers))
-    await ctx.reply(
-    f"Succesfully deleted your worthless {type.lower()} offer, id:{id}", 
-    mention_author=False
-    )
+    return 
 
-    liveData.updateDatabase()
+  liveData.saleOffers = [offer for offer in liveData.saleOffers if not(offer['id']==CHOICE_NUMBERS[id] and offer['type']==type.capitalize())]
+  await ctx.reply(
+  f"Succesfully deleted your worthless {type.lower()} offer, id:{id}", 
+  mention_author=False
+  )
+
+  liveData.updateDatabase()
   
 
 # ----- Run/Restart Bot -----
