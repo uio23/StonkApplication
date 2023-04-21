@@ -2,6 +2,8 @@ import os
 
 import asyncio
 
+from math import log10, floor
+
 import discord
 from discord.ext import commands
 
@@ -174,7 +176,7 @@ def record(saleDict, amount):
 
 def updateRecord():
   time = datetime.now(pytz.timezone('Pacific/Auckland'))
-  date = f"{time.year}-{time.month}-{time.day}"
+  date = f"{time.year}-{time.month}-{time.day-1}"
   
   if liveData.dailyRecords != []:
     priceSum = 0
@@ -199,8 +201,8 @@ def generateProfileEmbed(userName):
     title=f"{userName}'s Profile",
     description=f'''
       FreeMart: *{userDict['freemartName']}*\n
-      $: **{userDict['$']}**\n
-      FMC: **{userDict['FMC']}**''',
+      $: **{round_4_sig(userDict['$'])}**\n
+      FMC: **{round_4_sig(userDict['FMC'])}**''',
     color=BLUE
   )
   return profileEmbed
@@ -227,6 +229,10 @@ def generateSaleEmbed(bOs):
         value= f'{saleOffer["name"]}       {saleOffer["q"]}     {saleOffer["price"]}'
       )
   return saleEmbed
+
+
+def round_4_sig(x):
+  return round(x, 4-int(floor(log10(abs(x))))-1)
 
 
 def registerUser(ctx):
@@ -447,14 +453,15 @@ async def on_command_error(ctx, error):
       mention_author=True
     )
     return
-  await ctx.send('There was an issue executing your command', mention_author=False)  
+  
   if isinstance(error, commands.MissingRequiredArgument):
     await ctx.reply(
       'You missed one or more required arguments for this command',
       mention_author=False
     )
+    await ctx.send(f'Use **$help {ctx.invoked_with}** to learn more')
   return
-  
+  await ctx.send('There was an issue executing your command', mention_author=False)  
   await ctx.send(f'Use **$help {ctx.invoked_with}** to learn more')
   developer = await bot.fetch_user('909359661533233202')
   await developer.send(error)
@@ -576,8 +583,8 @@ async def buypoolcoin(ctx, amount: float = commands.parameter(default=None, desc
     poolInfo = discord.Embed(
       title='Coin Pool',
       description=f'''
-      Available coins: **{pool['FMC']}**\n 
-      Current price: **${liveData.saleOffers[0]['price']}** /per coin''',
+      Available coins: **{round_4_sig(pool['FMC'])}**\n 
+      Current price: **${round_4_sig(liveData.saleOffers[0]['price'])}** /per coin''',
       color=PURPLE
     )
     await ctx.reply(
